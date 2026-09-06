@@ -1,7 +1,7 @@
 import torch
 import math
-# import triton
-# import triton.language as tl
+import triton
+import triton.language as tl
 
 # Q: torch.Size([4, 128, 64])
 class MyFlashAttnAutogradFunctionClass(torch.autograd.Function):
