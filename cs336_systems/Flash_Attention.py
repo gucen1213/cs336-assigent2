@@ -225,6 +225,7 @@ def flash_backward_kernel(
     K_TILE_SIZE: tl.constexpr,
     is_causal: tl.constexpr,
 ):
+    # tl.program_id(0)和tl.program_id(1) 两个参数分别定位了全局内存中的某个batch和某个k和v的tile，每个线程块都有自己专属领地的kj和vj
     key_tile_index = tl.program_id(0)  # Triton 中用来获取当前内核实例在并行网格（Grid）中坐标位置,返回一个从 0 到 (N/BLOCK_K−1) 的整数。
     batch_index = tl.program_id(1) # 它对应 grid 定义里的第二个元素 B（Batch 维度）
 
@@ -309,7 +310,11 @@ def flash_backward_kernel(
         dKj += tl.dot(tl.trans(dSij).to(Qi.dtype), Qi)
         dQi = tl.dot(dSij.to(Qi.dtype), Kj)
         # 原子加法写回 dQ (多线程争抢修改同一个 Q)，打造一个[Q_TILE_SIZE, D]
-        dQ_ptrs = dQ_ptr + batch_index * stride_qb + offs_q[:, None] * stride_qq + offs_d[None, :] * stride_qd 
+        dQ_ptrs = dQ_ptr + batch_index * stride_qb + offs_q[:, None] * stride_qq + offs_d[None, :] * stride_qd
+
+        # 每个线程块中的K和V的tile,都会读取并计算出当前tile size维度的dQi。
+        # 由于每个线程都是并行的，一瞬间多个SM拿着各自的K和V块算好的dQi碎片同时写入内存，没有先后顺序。
+        # tl.atomic_add 的物理本质就是强制硬件排队写入dQ
         tl.atomic_add(dQ_ptrs, dQi)
 
         Q_block_ptr = tl.advance(Q_block_ptr, (Q_TILE_SIZE, 0))
