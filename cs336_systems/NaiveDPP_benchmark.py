@@ -19,6 +19,10 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from cs336_basics.nn_utils import cross_entropy,clip_gradient
 from cs336_basics.optimizer import AdamW
+from torch._utils import (
+    _flatten_dense_tensors,
+    _unflatten_dense_tensors,
+)
 
 
 @dataclass(frozen=True)
@@ -75,11 +79,17 @@ class NaiveDDP(torch.nn.Module):
     def sync_gradients(self):
         # 本模型每个 rank 使用相同参数。若条件分支使某参数只在部分
         # rank 上有梯度，不能直接跳过，否则 collective 次序会不一致。
-        for parameter in self.module.parameters():
-            if parameter.grad is None:
-                continue
-            dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM, async_op=False)
-            parameter.grad.div_(self.world_size)
+        grads = [p.grad for p in self.module.parameters() if p.grad is not None]
+        if grads == None:
+            return None
+        flatten_grad = _flatten_dense_tensors(grads)
+        dist.all_reduce(flatten_grad, op=dist.ReduceOp.SUM, async_op=False) #原地修改flatten_grad
+        
+        flatten_grad.grad.div_(self.world_size) #已经是所有rank的梯度之和了
+        synced_grads = _unflatten_dense_tensors(flatten_grad, grads)
+        # 将同步后的结果写回原来的 parameter.grad
+        for grad, synced_grad in zip(grads, synced_grads): # 把同步后的平均梯度，逐个写回模型参数原来的 .grad 中
+            grad.copy_(synced_grad)
 
 
 def synchronize(device):
